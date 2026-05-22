@@ -1,0 +1,1105 @@
+# ============================================================
+# INDUSTRIAL AI CATALYSIS PIPELINE
+# FINAL HIERARCHICAL VERSION
+# ============================================================
+
+import os
+import re
+import json
+import time
+import logging
+import requests
+import pandas as pd
+from datetime import datetime
+from urllib.parse import quote
+
+import fitz
+import camelot
+import tabula
+
+# ============================================================
+# CONFIG
+# ============================================================
+
+MAX_RESULTS = 20
+API_DELAY = 1.0
+
+OUTPUT_ROOT = "CATALYSIS_INDUSTRIAL_OUTPUT"
+
+MP_API_KEY = "B3Pkyq4bxpgel7As5AWKinI0DW3xbfkg"
+
+CATALYSTS = [
+    "ru","fe","mo","co","ni",
+    "pt","pd","cu","zn","ir","rh"
+]
+
+BASE_QUERIES = [
+
+    "ammonia synthesis",
+
+    "nitrogen reduction reaction",
+
+    "hydroxylamine synthesis",
+
+    "urea Bosch Meiser"
+]
+
+# ============================================================
+# CREATE DIRECTORY TREE
+# ============================================================
+
+def create_directory_tree(root):
+
+    folders = {
+
+        "metadata":
+            os.path.join(root, "00_METADATA"),
+
+        "raw_literature":
+            os.path.join(root, "01_RAW_LITERATURE"),
+
+        "raw_materials":
+            os.path.join(root, "02_RAW_MATERIALS"),
+
+        "processed":
+            os.path.join(root, "03_PROCESSED_CATALYSIS"),
+
+        "tables":
+            os.path.join(root, "04_TABLE_EXTRACTION"),
+
+        "ml":
+            os.path.join(root, "05_ML_DATASETS"),
+
+        "metal_filters":
+            os.path.join(root, "06_METAL_FILTERS"),
+
+        "ocp":
+            os.path.join(root, "07_OCP_DATASETS"),
+
+        "logs":
+            os.path.join(root, "08_LOGS"),
+
+        "viz":
+            os.path.join(root, "09_VISUALIZATION_READY")
+    }
+
+    for k, v in folders.items():
+        os.makedirs(v, exist_ok=True)
+
+    os.makedirs(
+        os.path.join(folders["ml"], "classification"),
+        exist_ok=True
+    )
+
+    os.makedirs(
+        os.path.join(folders["ml"], "regression"),
+        exist_ok=True
+    )
+
+    os.makedirs(
+        os.path.join(folders["ml"], "embeddings"),
+        exist_ok=True
+    )
+
+    os.makedirs(
+        os.path.join(folders["ml"], "graph_nn"),
+        exist_ok=True
+    )
+
+    for ds in ["OC20", "OC22", "OC25"]:
+
+        os.makedirs(
+            os.path.join(folders["ocp"], ds),
+            exist_ok=True
+        )
+
+    return folders
+
+# ============================================================
+# LOGGER
+# ============================================================
+
+def setup_logging(log_dir):
+
+    logging.basicConfig(
+
+        filename=os.path.join(
+            log_dir,
+            "processing.log"
+        ),
+
+        level=logging.INFO,
+
+        format="%(asctime)s %(levelname)s %(message)s"
+    )
+
+# ============================================================
+# QUERY BUILDER
+# ============================================================
+
+def build_query(base):
+
+    return f"""
+    ({base})
+    AND (catalyst OR electrocatal* OR photocatal* OR heterogeneous)
+    AND (TON OR TOF OR selectivity OR yield OR conversion)
+    """
+
+# ============================================================
+# PDF TEXT EXTRACTION
+# ============================================================
+
+def extract_text_pdf(pdf_path):
+
+    try:
+
+        doc = fitz.open(pdf_path)
+
+        return " ".join(
+            [page.get_text() for page in doc]
+        )
+
+    except Exception as e:
+
+        logging.error(f"PDF TEXT ERROR: {e}")
+
+        return ""
+
+# ============================================================
+# TABLE EXTRACTION
+# ============================================================
+
+def extract_tables_camelot(pdf_path):
+
+    try:
+
+        return camelot.read_pdf(
+            pdf_path,
+            pages="all",
+            flavor="lattice"
+        )
+
+    except Exception as e:
+
+        logging.error(f"CAMELOT ERROR: {e}")
+
+        return []
+
+def extract_tables_tabula(pdf_path):
+
+    try:
+
+        return tabula.read_pdf(
+            pdf_path,
+            pages="all",
+            multiple_tables=True
+        )
+
+    except Exception as e:
+
+        logging.error(f"TABULA ERROR: {e}")
+
+        return []
+
+# ============================================================
+# TABLE FILTER
+# ============================================================
+
+def is_catalysis_table(df):
+
+    text = " ".join(
+        df.astype(str).values.flatten()
+    ).lower()
+
+    keywords = [
+
+        "ton",
+        "tof",
+        "selectivity",
+        "conversion",
+        "yield",
+        "catalyst",
+        "ammonia",
+        "reaction",
+        "activity"
+    ]
+
+    return sum(k in text for k in keywords) >= 3
+
+# ============================================================
+# METRICS EXTRACTION
+# ============================================================
+
+def extract_metrics_from_table(df):
+
+    text = " ".join(
+        df.astype(str).values.flatten()
+    ).lower()
+
+    def find(pattern):
+
+        m = re.findall(pattern, text)
+
+        return float(m[0]) if m else None
+
+    return {
+
+        "TON":
+            find(r"ton[^0-9]{0,10}(\d+\.?\d*)"),
+
+        "TOF":
+            find(r"tof[^0-9]{0,10}(\d+\.?\d*)"),
+
+        "selectivity_%":
+            find(r"selectivity[^0-9]{0,10}(\d{1,3})"),
+
+        "conversion_%":
+            find(r"conversion[^0-9]{0,10}(\d{1,3})"),
+
+        "yield_%":
+            find(r"yield[^0-9]{0,10}(\d{1,3})")
+    }
+
+# ============================================================
+# CATALYST DETECTION
+# ============================================================
+
+def detect_catalysts(text):
+
+    if not text:
+        return []
+
+    text = text.lower()
+
+    metals = CATALYSTS
+
+    supports = [
+
+        "tio2",
+        "al2o3",
+        "sio2",
+        "ceo2",
+        "zro2",
+        "carbon",
+        "graphene",
+        "cnt",
+        "mgo"
+    ]
+
+    synthesis = [
+
+        "impregnation",
+        "wet impregnation",
+        "solvothermal",
+        "hydrothermal",
+        "deposition",
+        "coprecipitation",
+        "sol-gel",
+        "electrodeposition"
+    ]
+
+    found = []
+
+    for m in metals:
+
+        if m in text:
+
+            found.append({
+
+                "metal":
+                    m,
+
+                "support":
+                    [s for s in supports if s in text],
+
+                "synthesis":
+                    [s for s in synthesis if s in text]
+            })
+
+    return found
+
+# ============================================================
+# RELEVANCE SCORE
+# ============================================================
+
+def relevance_score(text):
+
+    text = text.lower()
+
+    keys = [
+
+        "ton",
+        "tof",
+        "selectivity",
+        "yield",
+        "conversion",
+        "catalyst",
+        "ammonia"
+    ]
+
+    return sum(k in text for k in keys)
+
+# ============================================================
+# arXiv SEARCH
+# ============================================================
+
+def search_arxiv(query):
+
+    import feedparser
+
+    query_encoded = quote(query)
+
+    url = (
+
+        "http://export.arxiv.org/api/query?"
+        f"search_query=all:{query_encoded}"
+        f"&start=0"
+        f"&max_results={MAX_RESULTS}"
+    )
+
+    feed = feedparser.parse(url)
+
+    results = []
+
+    for e in feed.entries:
+
+        text = e.title + " " + e.summary
+
+        results.append({
+
+            "source":
+                "arXiv",
+
+            "title":
+                e.title,
+
+            "year":
+                e.published[:4],
+
+            "abstract":
+                e.summary,
+
+            "text":
+                text,
+
+            "score":
+                relevance_score(text),
+
+            "catalysts":
+                json.dumps(
+                    detect_catalysts(text),
+                    ensure_ascii=False
+                )
+        })
+
+    return results
+
+# ============================================================
+# CORE SEARCH
+# ============================================================
+
+def search_core(query):
+
+    url = "https://api.core.ac.uk/v3/search/works"
+
+    r = requests.get(
+
+        url,
+
+        params={
+            "q": query,
+            "limit": MAX_RESULTS
+        }
+    )
+
+    data = r.json()
+
+    results = []
+
+    for i in data.get("results", []):
+
+        text = (
+
+            i.get("title","")
+            + " "
+            + str(i.get("description",""))
+        )
+
+        results.append({
+
+            "source":
+                "CORE",
+
+            "title":
+                i.get("title",""),
+
+            "year":
+                i.get("yearPublished",""),
+
+            "abstract":
+                i.get("description",""),
+
+            "text":
+                text,
+
+            "score":
+                relevance_score(text),
+
+            "catalysts":
+                json.dumps(
+                    detect_catalysts(text),
+                    ensure_ascii=False
+                )
+        })
+
+    return results
+
+# ============================================================
+# MATERIALS PROJECT
+# ============================================================
+
+def search_materials_project(element):
+
+    headers = {
+        "X-API-KEY": MP_API_KEY
+    }
+
+    url = (
+
+        "https://api.materialsproject.org/"
+        "materials/summary/"
+    )
+
+    params = {
+
+        "elements":
+            element,
+
+        "_limit":
+            20
+    }
+
+    results = []
+
+    try:
+
+        r = requests.get(
+
+            url,
+
+            headers=headers,
+
+            params=params,
+
+            timeout=60
+        )
+
+        data = r.json().get("data", [])
+
+        for d in data:
+
+            text = json.dumps(d)
+
+            results.append({
+
+                "source":
+                    "Materials Project",
+
+                "title":
+                    d.get("material_id",""),
+
+                "formula":
+                    d.get("formula_pretty"),
+
+                "band_gap":
+                    d.get("band_gap"),
+
+                "formation_energy":
+                    d.get(
+                        "formation_energy_per_atom"
+                    ),
+
+                "energy_above_hull":
+                    d.get("energy_above_hull"),
+
+                "is_stable":
+                    d.get("is_stable"),
+
+                "symmetry":
+                    str(d.get("symmetry")),
+
+                "text":
+                    text,
+
+                "score":
+                    relevance_score(text),
+
+                "catalysts":
+                    json.dumps(
+                        detect_catalysts(text),
+                        ensure_ascii=False
+                    )
+            })
+
+    except Exception as e:
+
+        logging.error(
+            f"MATERIALS PROJECT ERROR: {e}"
+        )
+
+    return results
+
+# ============================================================
+# OQMD
+# ============================================================
+
+def search_oqmd(query):
+
+    url = (
+        "http://oqmd.org/oqmdapi/"
+        f"formationenergy?composition={query}"
+    )
+
+    results = []
+
+    try:
+
+        r = requests.get(url)
+
+        data = r.json().get("data", [])
+
+        for d in data:
+
+            text = json.dumps(d)
+
+            results.append({
+
+                "source":
+                    "OQMD",
+
+                "title":
+                    str(d.get("entry_id","")),
+
+                "composition":
+                    d.get("composition"),
+
+                "delta_e":
+                    d.get("delta_e"),
+
+                "stability":
+                    d.get("stability"),
+
+                "text":
+                    text,
+
+                "score":
+                    relevance_score(text),
+
+                "catalysts":
+                    json.dumps(
+                        detect_catalysts(text),
+                        ensure_ascii=False
+                    )
+            })
+
+    except Exception as e:
+
+        logging.error(f"OQMD ERROR: {e}")
+
+    return results
+
+# ============================================================
+# AFLOW
+# ============================================================
+
+def search_aflow(query):
+
+    url = (
+        "http://aflowlib.duke.edu/search/API/"
+        f"?species({query})"
+    )
+
+    results = []
+
+    try:
+
+        r = requests.get(url)
+
+        text = r.text
+
+        results.append({
+
+            "source":
+                "AFLOW",
+
+            "title":
+                query,
+
+            "text":
+                text,
+
+            "score":
+                relevance_score(text),
+
+            "catalysts":
+                json.dumps(
+                    detect_catalysts(text),
+                    ensure_ascii=False
+                )
+        })
+
+    except Exception as e:
+
+        logging.error(f"AFLOW ERROR: {e}")
+
+    return results
+
+# ============================================================
+# OPEN CATALYST PLACEHOLDER
+# ============================================================
+
+def search_ocp(query):
+
+    results = []
+
+    for ds in ["OC20", "OC22", "OC25"]:
+
+        text = f"{ds} adsorption dataset {query}"
+
+        results.append({
+
+            "source":
+                ds,
+
+            "title":
+                f"{ds}_{query}",
+
+            "dataset":
+                ds,
+
+            "text":
+                text,
+
+            "score":
+                relevance_score(text),
+
+            "catalysts":
+                json.dumps(
+                    detect_catalysts(text),
+                    ensure_ascii=False
+                )
+        })
+
+    return results
+
+# ============================================================
+# DEDUPLICATION
+# ============================================================
+
+def normalize(t):
+
+    return re.sub(
+        r"[^a-z0-9 ]",
+        "",
+        str(t).lower()
+    )
+
+def deduplicate(data):
+
+    seen = set()
+
+    out = []
+
+    for r in data:
+
+        key = (
+            normalize(r.get("title"))
+            + normalize(r.get("source"))
+        )
+
+        if key in seen:
+            continue
+
+        seen.add(key)
+
+        out.append(r)
+
+    return out
+
+# ============================================================
+# EXPORT HELPERS
+# ============================================================
+
+def export_dataframe(df, path_no_ext):
+
+    try:
+
+        df.to_csv(
+            path_no_ext + ".csv",
+            index=False
+        )
+
+        df.to_excel(
+            path_no_ext + ".xlsx",
+            index=False
+        )
+
+        df.to_parquet(
+            path_no_ext + ".parquet",
+            index=False
+        )
+
+    except Exception as e:
+
+        logging.error(f"EXPORT ERROR: {e}")
+
+# ============================================================
+# MAIN
+# ============================================================
+
+def run():
+
+    RUN_ID = datetime.now().strftime(
+        "RUN_%Y%m%d_%H%M%S"
+    )
+
+    ROOT = os.path.join(
+        OUTPUT_ROOT,
+        RUN_ID
+    )
+
+    os.makedirs(ROOT, exist_ok=True)
+
+    dirs = create_directory_tree(ROOT)
+
+    setup_logging(dirs["logs"])
+
+    logging.info("STARTING PIPELINE")
+
+    literature_data = []
+
+    materials_data = []
+
+    ocp_data = []
+
+    all_data = []
+
+    # ========================================================
+    # LITERATURE
+    # ========================================================
+
+    print("\n🔬 SEARCHING LITERATURE")
+
+    for q in BASE_QUERIES:
+
+        query = build_query(q)
+
+        print("QUERY:", q)
+
+        literature_data += search_arxiv(query)
+
+        literature_data += search_core(query)
+
+        time.sleep(API_DELAY)
+
+    # ========================================================
+    # MATERIAL DATABASES
+    # ========================================================
+
+    print("\n⚛️ SEARCHING MATERIAL DATABASES")
+
+    for metal in CATALYSTS:
+
+        print("METAL:", metal)
+
+        materials_data += search_materials_project(metal)
+
+        materials_data += search_oqmd(metal)
+
+        materials_data += search_aflow(metal)
+
+        ocp_data += search_ocp(metal)
+
+        time.sleep(API_DELAY)
+
+    # ========================================================
+    # DEDUP
+    # ========================================================
+
+    literature_data = deduplicate(
+        literature_data
+    )
+
+    materials_data = deduplicate(
+        materials_data
+    )
+
+    ocp_data = deduplicate(
+        ocp_data
+    )
+
+    all_data = (
+        literature_data
+        + materials_data
+        + ocp_data
+    )
+
+    master_df = pd.DataFrame(all_data)
+
+    # ========================================================
+    # RAW EXPORTS
+    # ========================================================
+
+    print("\n💾 EXPORTING RAW DATA")
+
+    export_dataframe(
+
+        pd.DataFrame(literature_data),
+
+        os.path.join(
+            dirs["raw_literature"],
+            "literature_raw"
+        )
+    )
+
+    export_dataframe(
+
+        pd.DataFrame(materials_data),
+
+        os.path.join(
+            dirs["raw_materials"],
+            "materials_raw"
+        )
+    )
+
+    export_dataframe(
+
+        pd.DataFrame(ocp_data),
+
+        os.path.join(
+            dirs["ocp"],
+            "ocp_raw"
+        )
+    )
+
+    # ========================================================
+    # MASTER DATASET
+    # ========================================================
+
+    print("\n🧠 BUILDING MASTER DATASET")
+
+    master_df["score"] = (
+        master_df["score"]
+        .fillna(0)
+    )
+
+    master_df = master_df.sort_values(
+        "score",
+        ascending=False
+    )
+
+    export_dataframe(
+
+        master_df,
+
+        os.path.join(
+            dirs["processed"],
+            "catalysis_master_dataset"
+        )
+    )
+
+    # ========================================================
+    # METAL FILTERS
+    # ========================================================
+
+    print("\n🧪 EXPORTING METAL FILTERS")
+
+    for metal in CATALYSTS:
+
+        subset = master_df[
+            master_df["catalysts"]
+            .astype(str)
+            .str.contains(
+                metal,
+                case=False,
+                na=False
+            )
+        ]
+
+        if len(subset):
+
+            export_dataframe(
+
+                subset,
+
+                os.path.join(
+                    dirs["metal_filters"],
+                    f"{metal}_dataset"
+                )
+            )
+
+    # ========================================================
+    # ML DATASETS
+    # ========================================================
+
+    print("\n🤖 BUILDING ML DATASETS")
+
+    ml_columns = [
+
+        "title",
+        "text",
+        "score",
+        "catalysts"
+    ]
+
+    ml_df = master_df[
+        [c for c in ml_columns if c in master_df.columns]
+    ]
+
+    export_dataframe(
+
+        ml_df,
+
+        os.path.join(
+            dirs["ml"],
+            "classification",
+            "activity_classifier_dataset"
+        )
+    )
+
+    regression_cols = [
+
+        "TON",
+        "TOF",
+        "yield_%",
+        "selectivity_%"
+    ]
+
+    reg_df = master_df[
+        [c for c in regression_cols if c in master_df.columns]
+    ]
+
+    export_dataframe(
+
+        reg_df,
+
+        os.path.join(
+            dirs["ml"],
+            "regression",
+            "activity_regression_dataset"
+        )
+    )
+
+    # ========================================================
+    # VISUALIZATION DATA
+    # ========================================================
+
+    print("\n📊 BUILDING VISUALIZATION FILES")
+
+    metal_stats = []
+
+    for metal in CATALYSTS:
+
+        count = len(
+
+            master_df[
+                master_df["catalysts"]
+                .astype(str)
+                .str.contains(
+                    metal,
+                    case=False,
+                    na=False
+                )
+            ]
+        )
+
+        metal_stats.append({
+
+            "metal":
+                metal,
+
+            "count":
+                count
+        })
+
+    viz_df = pd.DataFrame(metal_stats)
+
+    export_dataframe(
+
+        viz_df,
+
+        os.path.join(
+            dirs["viz"],
+            "metal_distribution"
+        )
+    )
+
+    # ========================================================
+    # METADATA
+    # ========================================================
+
+    print("\n📝 WRITING METADATA")
+
+    metadata = {
+
+        "run_id":
+            RUN_ID,
+
+        "timestamp":
+            str(datetime.now()),
+
+        "total_records":
+            len(master_df),
+
+        "literature_records":
+            len(literature_data),
+
+        "materials_records":
+            len(materials_data),
+
+        "ocp_records":
+            len(ocp_data),
+
+        "sources":
+            list(master_df["source"].unique()),
+
+        "metals":
+            CATALYSTS
+    }
+
+    with open(
+
+        os.path.join(
+            dirs["metadata"],
+            "metadata.json"
+        ),
+
+        "w",
+        encoding="utf-8"
+
+    ) as f:
+
+        json.dump(
+            metadata,
+            f,
+            indent=2,
+            ensure_ascii=False
+        )
+
+    # ========================================================
+    # FINAL LOG
+    # ========================================================
+
+    logging.info("PIPELINE FINISHED")
+
+    print("\n✅ PIPELINE FINISHED")
+    print("OUTPUT:", ROOT)
+    print("TOTAL RECORDS:", len(master_df))
+
+# ============================================================
+# ENTRY
+# ============================================================
+
+if __name__ == "__main__":
+
+    run()

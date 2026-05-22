@@ -1,0 +1,521 @@
+import os
+import re
+import json
+import time
+import requests
+import pandas as pd
+from datetime import datetime
+from urllib.parse import quote
+from tqdm import tqdm
+import feedparser
+
+# ─────────────────────────────────────────────
+# CONFIG
+# ─────────────────────────────────────────────
+
+MAX_RESULTS = 40
+API_DELAY = 1.0
+
+CATALYST_FILTER = None
+
+# Catalizadores típicos Andrussow
+CATALYSTS = [
+    "pt",
+    "rh",
+    "ir",
+    "pt-rh",
+    "platinum",
+    "rhodium",
+    "gauze",
+    "mesh",
+    "wire gauze"
+]
+
+# ─────────────────────────────────────────────
+# TOPICS ESPECÍFICOS ANDRUSSOW
+# ─────────────────────────────────────────────
+
+TOPICS = {
+    "andrussow_hcn": [
+
+        "Andrussow process catalyst hydrogen cyanide",
+
+        "HCN synthesis platinum rhodium gauze",
+
+        "methane ammonia oxidation HCN catalyst",
+
+        "hydrogen cyanide synthesis Pt Rh catalyst",
+
+        "Andrussow reactor catalyst performance",
+
+        "platinum rhodium mesh catalyst HCN",
+
+        "ammoxidation methane ammonia oxygen catalyst",
+
+        "industrial HCN catalyst gauze",
+
+        "high selectivity hydrogen cyanide catalyst",
+
+        "Pt Rh gauze durability Andrussow"
+
+    ]
+}
+
+# ─────────────────────────────────────────────
+# OUTPUT
+# ─────────────────────────────────────────────
+
+RUN_ID = datetime.now().strftime(
+    "Andrussow_Catalysis_%Y%m%d_%H%M%S"
+)
+
+BASE_DIR = os.path.join("OUTPUT", RUN_ID)
+
+os.makedirs(BASE_DIR, exist_ok=True)
+
+# subfolders
+
+RAW_DIR = os.path.join(BASE_DIR, "raw_data")
+FILTER_DIR = os.path.join(BASE_DIR, "filtered")
+META_DIR = os.path.join(BASE_DIR, "metadata")
+
+os.makedirs(RAW_DIR, exist_ok=True)
+os.makedirs(FILTER_DIR, exist_ok=True)
+os.makedirs(META_DIR, exist_ok=True)
+
+# ─────────────────────────────────────────────
+# EXTRACTION ENGINE
+# ─────────────────────────────────────────────
+
+def detect_catalysts(text):
+
+    if not text:
+        return []
+
+    text = text.lower()
+
+    found = []
+
+    for c in CATALYSTS:
+        if c.lower() in text:
+            found.append(c)
+
+    return list(set(found))
+
+# ─────────────────────────────────────────────
+# EXTRACT INDUSTRIAL METRICS
+# ─────────────────────────────────────────────
+
+def extract_metrics(text):
+
+    if not text:
+        return {}
+
+    text = text.lower()
+
+    # Yield
+    yield_m = re.findall(
+        r"(\d{1,3}(?:\.\d+)?)\s?%\s?(yield|conversion)",
+        text
+    )
+
+    # Selectivity
+    sel_m = re.findall(
+        r"(\d{1,3}(?:\.\d+)?)\s?%\s?selectivity",
+        text
+    )
+
+    # Temperature
+    temp_m = re.findall(
+        r"(\d{3,4})\s?°?\s?c",
+        text
+    )
+
+    # Stability
+    stab_m = re.findall(
+        r"(\d+)\s?(hours|hour|h)",
+        text
+    )
+
+    # Recovery
+    rec_m = re.findall(
+        r"(\d{1,3})\s?%\s?(recovery|recovered)",
+        text
+    )
+
+    return {
+
+        "yield_percent":
+            float(yield_m[0][0]) if yield_m else None,
+
+        "selectivity":
+            float(sel_m[0]) if sel_m else None,
+
+        "temperature_c":
+            int(temp_m[0]) if temp_m else None,
+
+        "stability_hours":
+            int(stab_m[0][0]) if stab_m else None,
+
+        "recovery":
+            int(rec_m[0][0]) if rec_m else None
+    }
+
+# ─────────────────────────────────────────────
+# PROCESS RELEVANCE SCORE
+# ─────────────────────────────────────────────
+
+def andrussow_score(row):
+
+    score = 0
+
+    title = str(row.get("title", "")).lower()
+    abstract = str(row.get("abstract", "")).lower()
+
+    full_text = title + " " + abstract
+
+    # citations
+    score += int(row.get("citations") or 0)
+
+    # keywords relevance
+    keywords = [
+        "andrussow",
+        "hydrogen cyanide",
+        "hcn",
+        "ammoxidation",
+        "pt-rh",
+        "gauze",
+        "platinum rhodium"
+    ]
+
+    for k in keywords:
+        if k in full_text:
+            score += 20
+
+    # selectivity bonus
+    if row.get("selectivity"):
+        score += row["selectivity"] * 2
+
+    # yield bonus
+    if row.get("yield_percent"):
+        score += row["yield_percent"] * 1.5
+
+    # durability
+    if row.get("stability_hours"):
+        score += row["stability_hours"] * 0.5
+
+    return score
+
+# ─────────────────────────────────────────────
+# arXiv
+# ─────────────────────────────────────────────
+
+def search_arxiv(query, max_results=MAX_RESULTS):
+
+    query = quote(query)
+
+    url = (
+        f"http://export.arxiv.org/api/query?"
+        f"search_query=all:{query}"
+        f"&start=0&max_results={max_results}"
+    )
+
+    feed = feedparser.parse(url)
+
+    results = []
+
+    for e in feed.entries:
+
+        text = (
+            e.title + " " + e.summary
+        )
+
+        row = {
+
+            "source": "arXiv",
+
+            "query": query,
+
+            "title": e.title,
+
+            "authors":
+                ", ".join([a.name for a in e.authors]),
+
+            "year": e.published[:4],
+
+            "citations": 0,
+
+            "abstract": e.summary,
+
+            "catalysts":
+                detect_catalysts(text),
+
+            **extract_metrics(text)
+        }
+
+        results.append(row)
+
+    return results
+
+# ─────────────────────────────────────────────
+# CORE
+# ─────────────────────────────────────────────
+
+def search_core(query, max_results=MAX_RESULTS):
+
+    url = "https://api.core.ac.uk/v3/search/works"
+
+    r = requests.get(
+        url,
+        params={
+            "q": query,
+            "limit": max_results
+        }
+    )
+
+    data = r.json()
+
+    results = []
+
+    for i in data.get("results", []):
+
+        authors = []
+
+        for a in i.get("authors", []):
+
+            if isinstance(a, dict):
+                authors.append(a.get("name", ""))
+            else:
+                authors.append(str(a))
+
+        text = (
+            (i.get("title", "") or "")
+            + " "
+            + (i.get("description", "") or "")
+        )
+
+        row = {
+
+            "source": "CORE",
+
+            "query": query,
+
+            "title": i.get("title", ""),
+
+            "authors": "; ".join(authors),
+
+            "year": i.get("yearPublished", ""),
+
+            "citations": 0,
+
+            "abstract":
+                i.get("description", ""),
+
+            "catalysts":
+                detect_catalysts(text),
+
+            **extract_metrics(text)
+        }
+
+        results.append(row)
+
+    return results
+
+# ─────────────────────────────────────────────
+# DEDUP
+# ─────────────────────────────────────────────
+
+def normalize(t):
+
+    return re.sub(
+        r"[^a-z0-9 ]",
+        "",
+        t.lower()
+    ).strip()
+
+def deduplicate(data):
+
+    seen = set()
+
+    out = []
+
+    for r in data:
+
+        key = normalize(
+            r.get("title", "")
+        )[:120]
+
+        if key in seen:
+            continue
+
+        seen.add(key)
+
+        out.append(r)
+
+    return out
+
+# ─────────────────────────────────────────────
+# FILTER
+# ─────────────────────────────────────────────
+
+def filter_catalyst(df, cat):
+
+    if not cat:
+        return df
+
+    return df[
+        df["catalysts"]
+        .astype(str)
+        .str.contains(cat, case=False)
+    ]
+
+# ─────────────────────────────────────────────
+# MAIN PIPELINE
+# ─────────────────────────────────────────────
+
+def run():
+
+    all_data = []
+
+    for topic, queries in TOPICS.items():
+
+        for q in tqdm(queries):
+
+            print(f"\nSearching: {q}")
+
+            all_data += search_arxiv(q)
+
+            all_data += search_core(q)
+
+            time.sleep(API_DELAY)
+
+    # deduplicate
+    all_data = deduplicate(all_data)
+
+    # dataframe
+    df = pd.DataFrame(all_data)
+
+    # score
+    df["andrussow_score"] = df.apply(
+        andrussow_score,
+        axis=1
+    )
+
+    # sort
+    df = df.sort_values(
+        "andrussow_score",
+        ascending=False
+    )
+
+    # optional catalyst filter
+    df = filter_catalyst(
+        df,
+        CATALYST_FILTER
+    )
+
+    # ─────────────────────────────
+    # EXPORTS
+    # ─────────────────────────────
+
+    excel_path = os.path.join(
+        RAW_DIR,
+        "andrussow_full_dataset.xlsx"
+    )
+
+    csv_path = os.path.join(
+        RAW_DIR,
+        "andrussow_full_dataset.csv"
+    )
+
+    parquet_path = os.path.join(
+        RAW_DIR,
+        "andrussow_full_dataset.parquet"
+    )
+
+    df.to_excel(excel_path, index=False)
+
+    df.to_csv(csv_path, index=False)
+
+    df.to_parquet(parquet_path, index=False)
+
+    # catalyst-specific exports
+
+    for c in ["pt", "rh", "pt-rh"]:
+
+        df_c = filter_catalyst(df, c)
+
+        df_c.to_excel(
+            os.path.join(
+                FILTER_DIR,
+                f"{c}_andrussow.xlsx"
+            ),
+            index=False
+        )
+
+    # top industrial papers
+    industrial = df[
+        (
+            df["selectivity"].fillna(0) > 70
+        )
+        |
+        (
+            df["yield_percent"].fillna(0) > 70
+        )
+    ]
+
+    industrial.to_excel(
+        os.path.join(
+            FILTER_DIR,
+            "high_performance_catalysts.xlsx"
+        ),
+        index=False
+    )
+
+    # metadata
+
+    meta = {
+
+        "run_id": RUN_ID,
+
+        "records": len(df),
+
+        "top_score":
+            float(df["andrussow_score"].max())
+            if len(df)
+            else 0,
+
+        "timestamp":
+            datetime.now().isoformat()
+    }
+
+    with open(
+
+        os.path.join(
+            META_DIR,
+            "metadata.json"
+        ),
+
+        "w",
+
+        encoding="utf-8"
+
+    ) as f:
+
+        json.dump(
+            meta,
+            f,
+            indent=2,
+            ensure_ascii=False
+        )
+
+    print("\nDONE")
+    print("Output:", BASE_DIR)
+    print("Records:", len(df))
+
+# ─────────────────────────────────────────────
+# ENTRY
+# ─────────────────────────────────────────────
+
+if __name__ == "__main__":
+
+    run()

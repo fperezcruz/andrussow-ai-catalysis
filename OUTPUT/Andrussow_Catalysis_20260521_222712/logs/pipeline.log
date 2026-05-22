@@ -1,0 +1,34 @@
+2026-05-21 22:27:12.246570 | SEARCHING: Andrussow process catalyst hydrogen cyanide
+2026-05-21 22:27:28.158153 | arXiv OK: Andrussow process catalyst hydrogen cyanide -> 0
+2026-05-21 22:27:31.103233 | CORE OK: Andrussow process catalyst hydrogen cyanide -> 14
+2026-05-21 22:27:33.872002 | SEARCHING: HCN synthesis platinum rhodium gauze
+2026-05-21 22:27:49.631181 | arXiv OK: HCN synthesis platinum rhodium gauze -> 0
+2026-05-21 22:27:52.732519 | CORE OK: HCN synthesis platinum rhodium gauze -> 14
+2026-05-21 22:27:56.154583 | SEARCHING: methane ammonia oxidation HCN catalyst
+2026-05-21 22:27:56.650089 | arXiv OK: methane ammonia oxidation HCN catalyst -> 0
+2026-05-21 22:27:58.843430 | CORE OK: methane ammonia oxidation HCN catalyst -> 14
+2026-05-21 22:28:01.874525 | SEARCHING: hydrogen cyanide synthesis Pt Rh catalyst
+2026-05-21 22:28:02.285200 | arXiv OK: hydrogen cyanide synthesis Pt Rh catalyst -> 0
+2026-05-21 22:28:04.323215 | CORE OK: hydrogen cyanide synthesis Pt Rh catalyst -> 15
+2026-05-21 22:28:07.677258 | SEARCHING: Andrussow reactor catalyst performance
+2026-05-21 22:28:39.866908 | arXiv OK: Andrussow reactor catalyst performance -> 0
+2026-05-21 22:28:42.397053 | CORE OK: Andrussow reactor catalyst performance -> 14
+2026-05-21 22:28:45.652127 | SEARCHING: platinum rhodium mesh catalyst HCN
+2026-05-21 22:28:56.251530 | arXiv OK: platinum rhodium mesh catalyst HCN -> 0
+2026-05-21 22:28:58.843676 | CORE OK: platinum rhodium mesh catalyst HCN -> 14
+2026-05-21 22:29:01.948139 | SEARCHING: ammoxidation methane ammonia oxygen catalyst
+2026-05-21 22:29:02.395679 | arXiv OK: ammoxidation methane ammonia oxygen catalyst -> 0
+2026-05-21 22:29:04.669906 | CORE OK: ammoxidation methane ammonia oxygen catalyst -> 15
+2026-05-21 22:29:08.126779 | SEARCHING: industrial HCN catalyst gauze
+2026-05-21 22:29:55.478240 | arXiv OK: industrial HCN catalyst gauze -> 0
+2026-05-21 22:29:58.769478 | CORE OK: industrial HCN catalyst gauze -> 15
+2026-05-21 22:30:01.296348 | SEARCHING: high selectivity hydrogen cyanide catalyst
+2026-05-21 22:30:48.168570 | arXiv OK: high selectivity hydrogen cyanide catalyst -> 0
+2026-05-21 22:30:50.455302 | CORE OK: high selectivity hydrogen cyanide catalyst -> 15
+2026-05-21 22:30:53.746971 | SEARCHING: Pt Rh gauze durability Andrussow
+2026-05-21 22:30:54.201533 | arXiv OK: Pt Rh gauze durability Andrussow -> 0
+2026-05-21 22:30:55.562106 | CORE OK: Pt Rh gauze durability Andrussow -> 1
+2026-05-21 22:30:59.870352 | EXPORT OK
+2026-05-21 22:30:59.921395 | DONE
+2026-05-21 22:30:59.922190 | OUTPUT: OUTPUT\Andrussow_Catalysis_20260521_222712
+2026-05-21 22:30:59.923015 | RECORDS: 100
